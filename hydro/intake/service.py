@@ -75,7 +75,15 @@ class IntakeService:
         return payload
 
     def current_head(self, unit_id: str) -> float:
-        return float(self._head_payload(unit_id)["value"])
+        payload = self._head_payload(unit_id)
+        value = float(payload["value"])
+        with self._lock:
+            measured = self._measured.get(unit_id)
+        if measured is not None and measured != value:
+            raise HeadNotPersistedError(
+                "measured head not persisted for " + unit_id
+            )
+        return value
 
     def validate(self, unit_id: str) -> None:
         self._head_payload(unit_id)

@@ -3,7 +3,8 @@
 Opening the vanes is gated on the head already being written to durable storage,
 and adjusting them is gated on the dispatch latch being released. Both gates are
 evaluated against the state that the other packages publish, never against a
-private copy.
+private copy. The head at the moment of opening is written into the guide
+record, and stroke commands are scaled by the current oil calibration.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Protocol
 
-from hydro.domain.constants import GUIDE_MAX_OPENING
+from hydro.domain.constants import DEFAULT_OIL_GAIN, GUIDE_MAX_OPENING
 from hydro.domain.errors import GuideLatchedError, HeadNotPersistedError, NoHeadError
 from hydro.interlock.latch import Latch
 from hydro.journal.store import KIND_GUIDE, RecordStore
@@ -103,7 +104,7 @@ class GuideService:
         head_value = self._head.current_head(unit_id)
         if head_value <= 0:
             raise NoHeadError("head must be positive before opening guide vanes")
-        payload = self._stage(unit_id, open=True, applied_head=0.0)
+        payload = self._stage(unit_id, open=True, applied_head=head_value)
         self._audit.stage("guide-open", unit_id, "opened with persisted head", tick)
         self._journal.commit()
         return payload
@@ -123,17 +124,18 @@ class GuideService:
         return payload
 
     def adjust(self, unit_id: str, target: float, tick: int) -> float:
-        try:
-            self.require_released(unit_id)
-        except GuideLatchedError:
-            pass
+        self.require_released(unit_id)
         opening = self.clamp_opening(target)
         self._write(unit_id, opening=opening, stroke=opening)
         self._audit.record("guide-adjust", unit_id, "adjusted guide vanes", tick)
         return opening
 
     def stroke(self, unit_id: str, millimetres: float, now: int) -> float:
-        return float(millimetres)
+        if self._gain is None:
+            gain = DEFAULT_OIL_GAIN
+        else:
+            gain = self._gain.oil_gain(unit_id, now)
+        return float(millimetres) * gain
 
     def last_stroke(self, unit_id: str) -> float:
         return float(self._payload(unit_id)["stroke"])
@@ -168,7 +170,7 @@ class GuideService:
         return True
 
     def release_latch(self, unit_id: str, tick: int) -> bool:
-        self._latch.reset(unit_id)
+        self._latch.release(unit_id, "overspeed must be cleared to release")
         self._audit.record("guide-release", unit_id, "guide latch released", tick)
         return False
 
